@@ -7,7 +7,7 @@ import openpyxl
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import ct_claims as ct  # noqa: E402
+import excel_converter as ct  # noqa: E402
 
 D = dt.datetime
 
