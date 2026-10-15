@@ -539,13 +539,29 @@ def run(timeclock: Path, chart_path: Path, chart_sheet: str, out: Path | None,
                      warnings=sum(i.level == "WARN" for i in issues))
 
 
+def read_config() -> dict:
+    """Contents of config/excel_converter.json, or {} if missing or unreadable."""
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def config_chart() -> str | None:
     """Chart path saved in config/excel_converter.json, if it is set and the file exists."""
-    try:
-        chart = json.loads(CONFIG_FILE.read_text()).get("chart")
-    except (OSError, ValueError, AttributeError):
-        return None
+    chart = read_config().get("chart")
     return chart if chart and Path(chart).exists() else None
+
+
+def config_rate() -> float:
+    """default_rate from config/excel_converter.json, else DEFAULT_RATE."""
+    rate = read_config().get("default_rate")
+    if rate is None:
+        return DEFAULT_RATE
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate <= 0:
+        raise InputError(f'"default_rate" in {CONFIG_FILE} must be a positive number, got {rate!r}')
+    return float(rate)
 
 
 def gui_pick(args):
@@ -568,7 +584,7 @@ def gui_pick(args):
             sys.exit(0)
         try:
             CONFIG_FILE.parent.mkdir(exist_ok=True)
-            CONFIG_FILE.write_text(json.dumps({"chart": chart}))
+            CONFIG_FILE.write_text(json.dumps({**read_config(), "chart": chart}, indent=2))
         except OSError:
             pass
     args.timeclock, args.chart = tc, chart
@@ -583,7 +599,8 @@ def main(argv=None):
     p.add_argument("--chart-sheet", default=DEFAULT_CHART_SHEET)
     p.add_argument("-o", "--out", help="output file (default: output/<date>_<time>.xlsx beside the script)")
     p.add_argument("--month", help="claim month as YYYY-MM (default: the month most shifts fall in)")
-    p.add_argument("--rate", type=float, default=DEFAULT_RATE, help=f"$/hr (default {DEFAULT_RATE})")
+    p.add_argument("--rate", type=float, default=None,
+                   help=f"$/hr (default: \"default_rate\" in config/excel_converter.json, else {DEFAULT_RATE})")
     p.add_argument("--date-field", choices=("start", "end"), default="start",
                    help="which date a shift counts on; matters for overnight shifts (default: start)")
     args = p.parse_args(argv)
@@ -596,8 +613,9 @@ def main(argv=None):
         if not args.chart:
             p.error(f"--chart is required (or set \"chart\" to an existing file in {CONFIG_FILE})")
     try:
+        rate = args.rate if args.rate is not None else config_rate()
         out, stats = run(Path(args.timeclock), Path(args.chart), args.chart_sheet,
-                         Path(args.out) if args.out else None, args.month, args.rate, args.date_field)
+                         Path(args.out) if args.out else None, args.month, rate, args.date_field)
     except InputError as e:
         if gui:
             gui[1].showerror("Cannot convert", str(e))
