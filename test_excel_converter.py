@@ -16,8 +16,8 @@ def make_timeclock(path, blocks, total_row=True):
     """blocks: [(header, total, [(start, end, hours), ...])]"""
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(["Client Number and Name", None, None, "Total Hours", "First name", "Last name",
-               "Start Date", "In", None, "End Date", "Out", None, "Shift hours", None])
+    ws.append(["Type", "Sub item", "Total number of shifts", "Total shift hours", "First name", "Last name",
+               "Start Date", "In", "Start - location", "End Date", "Out", "End - location", "Shift hours", None])
     for header, total, shifts in blocks:
         ws.append([header, None, None, total] + [""] * 9)
         for s, e, h in shifts:
@@ -36,7 +36,7 @@ def make_chart(path, rows):
     ws.append([])
     ws.cell(3, 1, "Family #"), ws.cell(3, 2, "Client #"), ws.cell(3, 4, "Name")
     ws.cell(3, 6, "AHS ID #"), ws.cell(3, 10, "Homemaking hours")
-    ws.cell(3, 11, "Personal Care Hours"), ws.cell(3, 12, "Respite hours")
+    ws.cell(3, 11, "Personal Care hours"), ws.cell(3, 12, "Respite hours")
     r = 4
     for fam, cli, name, ahs, hm, pc, rs in rows:
         for c, v in ((1, fam), (2, cli), (4, name), (6, ahs), (10, hm), (11, pc), (12, rs)):
