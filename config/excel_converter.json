@@ -1,4 +1,4 @@
 {
-    "chart": "./client_chart.xlsx",
+    "chart": "./data/client_chart.xlsx",
     "default_rate": 35.03
 }
