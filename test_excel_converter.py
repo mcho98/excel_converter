@@ -138,3 +138,62 @@ def test_wrong_file_gives_readable_error(tmp_path):
     wb.save(bad)
     with pytest.raises(ct.InputError, match="Shift hours"):
         ct.read_timeclock(bad)
+
+
+def test_half_month_dollar_sums(files):
+    run(files, month="2026-09")                                     # September: 30 days
+    ws = sheet(files[2])["Claim 2026-09"]
+    top = ct.FIRST_BLOCK_ROW
+    mid, end = ct.FIRST_DAY_COL + 14, ct.FIRST_DAY_COL + 29        # S = day 15, AH = day 30
+    assert ws.cell(top + 18, mid).value == "Days 1-15" and ws.cell(top + 18, end).value == "Days 16-30"
+    assert ws.cell(top + 19, mid).value == f"=SUM(E{top + 14}:S{top + 14})"
+    assert ws.cell(top + 20, end).value == f"=SUM(T{top + 15}:AH{top + 15})"
+    assert ws.cell(top + 22, end).value == f"=SUM(AH{top + 19}:AH{top + 21})"
+    assert ws.cell(top + 21, mid - 1).value == "Subtotal Respite $$"
+    assert ws.cell(top + 22, end - 1).value == "Subtotal Total $$"
+    assert ws.cell(top + 21, 4).value is None and ct.BLOCK_PITCH > 22
+
+
+def test_grand_totals_after_last_block(files):
+    run(files, month="2026-09")
+    ws = sheet(files[2])["Claim 2026-09"]
+    n = 4                                                            # blocks in the fixture
+    top = ct.FIRST_BLOCK_ROW + (n - 1) * ct.BLOCK_PITCH + 22 + 2 - 18   # 1 blank row under the last block
+    mid, end = ct.FIRST_DAY_COL + 14, ct.FIRST_DAY_COL + 29
+    assert ws.cell(top + 18, mid).value == 'All clients 1-15' and top + 18 == ct.FIRST_BLOCK_ROW + 3 * ct.BLOCK_PITCH + 24
+    assert ws.cell(top + 20, end - 1).fill.fgColor.rgb[-6:] == ct.YELLOW
+    f = ws.cell(top + 22, mid).value
+    assert f.startswith("=SUM(S25,") and f.count(",") == n - 1
+    assert ws.cell(top + 22, end - 1).value == "Subtotal Total $$"
+    assert ws.cell(top + 20, ct.GRAND_COL).value == f"=S{top + 20}+AH{top + 20}"
+
+
+def test_dollar_rows_have_month_total(files):
+    run(files, month="2026-09")
+    ws = sheet(files[2])["Claim 2026-09"]
+    top = ct.FIRST_BLOCK_ROW
+    for off in (14, 15, 16, 17):
+        assert ws.cell(top + off, ct.SUM_COL).value == f"=SUM(E{top + off}:AI{top + off})"
+
+
+def test_each_block_has_a_border(files):
+    run(files, month="2026-09")
+    ws = sheet(files[2])["Claim 2026-09"]
+    for i in range(4):                                  # includes the two clients of one family
+        top = ct.FIRST_BLOCK_ROW + i * ct.BLOCK_PITCH
+        assert ws.cell(top, 1).border.top.style == "medium" and ws.cell(top, 1).border.left.style == "medium"
+        assert ws.cell(top + 22, ct.GRAND_COL).border.bottom.style == "medium"
+        assert ws.cell(top + 22, ct.GRAND_COL).border.right.style == "medium"
+
+
+def test_subtotal_label_and_ak_highlight_colors(files):
+    run(files, month="2026-09")
+    ws = sheet(files[2])["Claim 2026-09"]
+    top = ct.FIRST_BLOCK_ROW
+    rgb = lambda cell: cell.fill.fgColor.rgb[-6:]               # noqa: E731
+    for k in range(4):
+        for dest in (ct.FIRST_DAY_COL + 14, ct.FIRST_DAY_COL + 29):
+            assert rgb(ws.cell(top + 19 + k, dest - 1)) == ct.BLUE_M
+    assert rgb(ws.cell(top + 7, ct.GRAND_COL)) == ct.YELLOW
+    assert ws.cell(top + 7, ct.GRAND_COL).value.startswith("=SUM(")
+    assert ws.cell(top + 8, ct.GRAND_COL).fill.fgColor.rgb[-6:] != ct.YELLOW

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import openpyxl
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter as col
 
 # --- layout of the claim sheet (matches the old workbook) -------------------
@@ -64,7 +64,7 @@ BLOCK_FILLS = [
     (2, 1, 2, ORANGE_L), (2, 4, 4, BLUE_L),                          # client name
     (3, 1, 2, ORANGE_M), (3, 3, 4, BLUE_L),
     (4, 3, 4, BLUE_L),                                               # rate
-    (8, GRAND_COL, GRAND_COL, GREEN_M),
+    (7, GRAND_COL, GRAND_COL, YELLOW),                               # monthly hours total (AK)
     *[(o, 3, 4, BLUE_M) for o in range(9, 19)],                      # AHS#, claim/day, $ labels
     (10, FIRST_DAY_COL, LAST_DAY_COL, BLUE_L), (10, SUM_COL, SUM_COL, YELLOW),   # daily total
     (12, 4, 4, GREEN_D), (12, FIRST_DAY_COL, LAST_DAY_COL, BLUE_L),             # claim/day
@@ -437,8 +437,60 @@ def write_block(ws, top, b: Block, rate, days_in_month):
     first, last = col(FIRST_DAY_COL), col(LAST_DAY_COL)
     for rr in (5, 6, 7, 8, 10, 12):
         ws.cell(r(rr), SUM_COL, f"=SUM({first}{r(rr)}:{last}{r(rr)})").number_format = "0.00"
+    for rr in (14, 15, 16, 17):                            # dollar rows: month total after the last day
+        ws.cell(r(rr), SUM_COL, f"=SUM({first}{r(rr)}:{last}{r(rr)})").number_format = "0.00"
     ws.cell(r(7), GRAND_COL, f"=SUM({col(SUM_COL)}{r(5)}:{col(SUM_COL)}{r(7)})")
     ws.cell(r(12), GRAND_COL, f"={col(SUM_COL)}{r(10)}*{rate_ref}").number_format = "0.00"
+
+    # half-month dollar sums, rows +19..+22: days 1-15 under day 15, days 16-end under the last day
+    mid, end = FIRST_DAY_COL + 14, FIRST_DAY_COL + days_in_month - 1
+    halves = [(mid, FIRST_DAY_COL, mid, "Days 1-15"), (end, mid + 1, end, f"Days 16-{days_in_month}")]
+    labels = ["Homemaking $$", "Personal Care $$", "Respite $$", "Total $$"]
+    for dest, c1, c2, title in halves:
+        ws.cell(r(18), dest, title).font = BOLD
+        for k, lab in enumerate(labels):                   # right-aligned so the text spills left
+            ws.cell(r(19 + k), dest - 1, f"Subtotal {lab}").alignment = Alignment(horizontal="right")
+            paint(ws, r(19 + k), dest - 1, dest - 1, BLUE_M)
+        for k in range(3):
+            ws.cell(r(19 + k), dest, f"=SUM({col(c1)}{r(14 + k)}:{col(c2)}{r(14 + k)})")
+        ws.cell(r(22), dest, f"=SUM({col(dest)}{r(19)}:{col(dest)}{r(21)})").font = BOLD
+        for k in range(4):
+            ws.cell(r(19 + k), dest).number_format = "0.00"
+
+
+def box(ws, top_row, bottom_row, first_col, last_col):
+    """Outline a range with a medium border, keeping each cell's fill and font."""
+    edge = Side(style="medium")
+    for row in range(top_row, bottom_row + 1):
+        for c in range(first_col, last_col + 1):
+            ws.cell(row, c).border = Border(left=edge if c == first_col else None,
+                                            right=edge if c == last_col else None,
+                                            top=edge if row == top_row else None,
+                                            bottom=edge if row == bottom_row else None)
+
+
+def write_grand_totals(ws, n_blocks, days_in_month):
+    """After the last block: each subtotal row summed over all clients, plus both halves together."""
+    top = FIRST_BLOCK_ROW + (n_blocks - 1) * BLOCK_PITCH + 22 + 2 - 18   # header row sits 1 blank row under the last block
+    mid, end = FIRST_DAY_COL + 14, FIRST_DAY_COL + days_in_month - 1
+    ws.cell(top + 18, mid, "All clients 1-15").font = BOLD
+    ws.cell(top + 18, end, f"All clients 16-{days_in_month}").font = BOLD
+    ws.cell(top + 18, GRAND_COL, "Month").font = BOLD
+    right = Alignment(horizontal="right")
+    for k, lab in enumerate(["Homemaking $$", "Personal Care $$", "Respite $$", "Total $$"]):
+        row = top + 19 + k
+        for dest in (mid, end):
+            refs = ",".join(f"{col(dest)}{FIRST_BLOCK_ROW + i * BLOCK_PITCH + 19 + k}" for i in range(n_blocks))
+            ws.cell(row, dest - 1, f"Subtotal {lab}").alignment = right
+            paint(ws, row, dest - 1, dest - 1, YELLOW)
+            ws.cell(row, dest, f"=SUM({refs})")
+        ws.cell(row, GRAND_COL - 1, f"Month {lab}").alignment = right
+        paint(ws, row, GRAND_COL - 1, GRAND_COL - 1, YELLOW)
+        ws.cell(row, GRAND_COL, f"={col(mid)}{row}+{col(end)}{row}")
+        for c in (mid, end, GRAND_COL):
+            ws.cell(row, c).number_format = "0.00"
+            if k == 3:
+                ws.cell(row, c).font = BOLD
 
 
 def write_workbook(out_path, blocks, summary, input_rows, issues, year, month, rate, date_field):
@@ -465,6 +517,9 @@ def write_workbook(out_path, blocks, summary, input_rows, issues, year, month, r
 
     for i, b in enumerate(blocks):
         write_block(ws, FIRST_BLOCK_ROW + i * BLOCK_PITCH, b, rate, days)
+        box(ws, FIRST_BLOCK_ROW + i * BLOCK_PITCH, FIRST_BLOCK_ROW + i * BLOCK_PITCH + 22, 1, GRAND_COL)
+    if blocks:
+        write_grand_totals(ws, len(blocks), days)
     for c, w in zip("ABCD", (13, 14, 30, 14)):
         ws.column_dimensions[c].width = w
     for c in range(FIRST_DAY_COL, GRAND_COL + 1):
@@ -565,29 +620,90 @@ def config_rate() -> float:
 
 
 def gui_pick(args):
+    """Show one form for the time clock, chart, rate and output; fill args from it."""
     try:
         import tkinter as tk
-        from tkinter import filedialog, messagebox
+        from tkinter import filedialog, messagebox, ttk
     except ImportError:
-        sys.exit("No file pickers available here. Run: python excel_converter.py TIMECLOCK.xlsx --chart FILE.xlsx")
-    root = tk.Tk()
-    root.withdraw()
+        sys.exit("No window available here. Run: python excel_converter.py TIMECLOCK.xlsx --chart FILE.xlsx")
     ft = [("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")]
-    tc = filedialog.askopenfilename(title="Time clock export", filetypes=ft)
-    if not tc:
+    saved_chart = config_chart()
+    try:
+        default_rate = config_rate()
+    except InputError:
+        default_rate = DEFAULT_RATE
+
+    root = tk.Tk()
+    root.title("Excel converter")
+    root.columnconfigure(1, weight=1)
+    tc_var = tk.StringVar()
+    chart_var = tk.StringVar(value=args.chart or saved_chart or "")
+    rate_var = tk.StringVar(value=f"{args.rate if args.rate is not None else default_rate:g}")
+    out_var = tk.StringVar(value=args.out or "")
+    result = {}
+
+    def browse(var, title, save=False):
+        if save:
+            path = filedialog.asksaveasfilename(title=title, defaultextension=".xlsx",
+                                                filetypes=[("Excel files", "*.xlsx")])
+        else:
+            path = filedialog.askopenfilename(title=title, filetypes=ft)
+        if path:
+            var.set(path)
+
+    rows = [("Time clock export", tc_var, "Time clock export", False, "Required"),
+            ("Client chart workbook", chart_var, "Workbook containing the Family# Client# Chart sheet", False,
+             "Default from config" if saved_chart else "Required"),
+            ("Output file", out_var, "Save the claim workbook as", True,
+             "Leave blank for output/<date>_<time>.xlsx")]
+    entries = {}
+    for i, (label, var, title, save, hint) in enumerate(rows):
+        ttk.Label(root, text=label).grid(row=i * 2, column=0, sticky="w", padx=8, pady=(8, 0))
+        entries[label] = ttk.Entry(root, textvariable=var, width=60)
+        entries[label].grid(row=i * 2, column=1, sticky="ew", padx=4, pady=(8, 0))
+        ttk.Button(root, text="Browse...",
+                   command=lambda v=var, t=title, s=save: browse(v, t, s)).grid(row=i * 2, column=2, padx=8, pady=(8, 0))
+        ttk.Label(root, text=hint, foreground="gray").grid(row=i * 2 + 1, column=1, sticky="w", padx=4)
+    r = len(rows) * 2
+    ttk.Label(root, text="Rate ($/hr)").grid(row=r, column=0, sticky="w", padx=8, pady=8)
+    ttk.Entry(root, textvariable=rate_var, width=10).grid(row=r, column=1, sticky="w", padx=4, pady=8)
+
+    def ok(_event=None):
+        tc, chart, out = tc_var.get().strip(), chart_var.get().strip(), out_var.get().strip()
+        if not tc or not Path(tc).is_file():
+            return messagebox.showerror("Missing file", "Choose the time clock export.", parent=root)
+        if not chart or not Path(chart).is_file():
+            return messagebox.showerror("Missing file", "Choose the client chart workbook.", parent=root)
+        try:
+            rate = float(rate_var.get())
+            if rate <= 0 or rate != rate:
+                raise ValueError
+        except ValueError:
+            return messagebox.showerror("Bad rate", "The rate must be a positive number.", parent=root)
+        result.update(timeclock=tc, chart=chart, rate=rate, out=out or None)
+        root.withdraw()
+        root.quit()
+
+    buttons = ttk.Frame(root)
+    buttons.grid(row=r + 1, column=0, columnspan=3, sticky="e", padx=8, pady=(0, 8))
+    ttk.Button(buttons, text="Cancel", command=root.quit).pack(side="right", padx=(8, 0))
+    ttk.Button(buttons, text="Convert", command=ok).pack(side="right")
+    root.bind("<Return>", ok)
+    root.bind("<Escape>", lambda _e: root.quit())
+    root.protocol("WM_DELETE_WINDOW", root.quit)
+    root.mainloop()
+    if not result:
+        root.destroy()
         sys.exit(0)
-    chart = args.chart or config_chart()
-    if not chart:
-        chart = filedialog.askopenfilename(title="Workbook containing the Family# Client# Chart sheet",
-                                           filetypes=ft)
-        if not chart:
-            sys.exit(0)
+
+    if result["chart"] != saved_chart:
         try:
             CONFIG_FILE.parent.mkdir(exist_ok=True)
-            CONFIG_FILE.write_text(json.dumps({"default_rate": DEFAULT_RATE, **read_config(), "chart": chart}, indent=2))
+            CONFIG_FILE.write_text(json.dumps({"default_rate": DEFAULT_RATE, **read_config(),
+                                               "chart": result["chart"]}, indent=2))
         except OSError:
             pass
-    args.timeclock, args.chart = tc, chart
+    args.timeclock, args.chart, args.rate, args.out = (result[k] for k in ("timeclock", "chart", "rate", "out"))
     return root, messagebox
 
 
