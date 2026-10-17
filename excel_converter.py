@@ -169,6 +169,18 @@ def clean(text) -> str:
     return re.sub(r"\s+", " ", str(text).replace("\xa0", " ")).strip()
 
 
+def strip_leading_parens(text) -> str:
+    """Drop leading (...) groups, e.g. '(回國3個月)59 Lian' -> '59 Lian'. Later parentheses stay."""
+    return re.sub(r"^(?:\s*[(（][^)）]*[)）])+", "", str(text))
+
+
+OFFICE = "Office"      # special header with no family number: gets a block with blank family/client/AHS
+
+
+def is_office(header) -> bool:
+    return clean(header) == OFFICE
+
+
 def norm(text) -> str:
     """Header text for matching: lower case, no spaces ('AHS ID #' == 'ahs id#')."""
     return re.sub(r"\s+", "", clean(text)).lower()
@@ -215,10 +227,10 @@ def read_timeclock(path: Path):
         row = list(row) + [None] * (max(cols.values()) + 1 - len(row))
         name = row[cols["name"]]
         if name not in (None, ""):
-            fam = re.match(r"\s*(\d+)(?=\s|\D|$)", str(name))
+            fam = re.match(r"\s*(\d+)(?=\s|\D|$)", strip_leading_parens(name))
             cur = ClientEntry(rownum, clean(name), int(fam.group(1)) if fam else None,
                               to_float(row[cols["total"]]))
-            if cur.family is None:
+            if cur.family is None and not is_office(cur.header):
                 issues.append(Issue("ERROR", f"{path.name} row {rownum}",
                                     f"Header '{cur.header}' does not start with a family number; "
                                     "its hours are NOT in the claim sheet."))
@@ -320,6 +332,7 @@ def plan(entries, chart, year, month, date_field):
     daily_by_family: dict[int, dict[int, float]] = {}
     for e in entries:
         placed = outside = 0.0
+        key = OFFICE if is_office(e.header) else e.family      # key of the claim block this entry feeds
         for s in e.shifts:
             d = s.start if date_field == "start" else s.end
             if d is None:
@@ -336,12 +349,12 @@ def plan(entries, chart, year, month, date_field):
             else:
                 placed += s.hours
                 counted = d
-                if e.family is not None:
-                    daily_by_family.setdefault(e.family, {})
-                    daily_by_family[e.family][d.day] = daily_by_family[e.family].get(d.day, 0) + s.hours
+                if key is not None:
+                    daily_by_family.setdefault(key, {})
+                    daily_by_family[key][d.day] = daily_by_family[key].get(d.day, 0) + s.hours
             input_rows.append((e.family, e.header, s.start, s.end, s.hours, s.row, counted))
-        in_report = placed if e.family is not None else 0.0
-        if e.family is None:
+        in_report = placed if key is not None else 0.0
+        if key is None:
             outside = sum(s.hours for s in e.shifts)
         summary.append([e.family, e.header, e.total, len(e.shifts), round(in_report, 2),
                         round(outside, 2)])
@@ -377,6 +390,11 @@ def plan(entries, chart, year, month, date_field):
             blocks.append(Block(fam, r.client, name, r.ahs_id,
                                 (r.homemaking, r.personal_care, r.respite),
                                 daily if i == 0 else {}, note))
+    office = [e for e in entries if is_office(e.header)]
+    if office:
+        if len(office) > 1:
+            issues.append(Issue("WARN", OFFICE, f"{len(office)} '{OFFICE}' headers were combined."))
+        blocks.append(Block(None, None, OFFICE, None, (None, None, None), daily_by_family.get(OFFICE, {})))
     return blocks, summary, input_rows, issues
 
 

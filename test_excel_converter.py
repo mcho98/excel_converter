@@ -125,7 +125,7 @@ def test_same_family_twice_is_combined(tmp_path):
 
 def test_header_without_family_number_is_an_error(tmp_path):
     tc, ch = tmp_path / "tc.xlsx", tmp_path / "chart.xlsx"
-    make_timeclock(tc, [("Office", 2, [(D(2026, 9, 1), D(2026, 9, 1), 2)])])
+    make_timeclock(tc, [("Mystery Person", 2, [(D(2026, 9, 1), D(2026, 9, 1), 2)])])
     make_chart(ch, [(2, 3, "Al", "A1", 1, 2, 3)])
     _, stats = ct.run(tc, ch, ct.DEFAULT_CHART_SHEET, tmp_path / "o.xlsx", "2026-09", 34.03, "start")
     assert stats["errors"] == 1 and stats["hours_out"] == 2
@@ -204,3 +204,28 @@ def test_subtotal_label_and_ak_highlight_colors(files):
     assert rgb(ws.cell(top + 7, ct.GRAND_COL)) == ct.YELLOW
     assert ws.cell(top + 7, ct.GRAND_COL).value.startswith("=SUM(")
     assert ws.cell(top + 8, ct.GRAND_COL).fill.fgColor.rgb[-6:] != ct.YELLOW
+
+
+def test_leading_parentheses_ignored_before_family_number():
+    f = ct.strip_leading_parens
+    assert f("(回國)67 Rui dad").strip().startswith("67")
+    assert f("(回國3個月)59 Lian Mei Zhou").strip().startswith("59")
+    assert f("（a）(b) 5 X") .strip().startswith("5")
+    assert f("12 Li (Wu)") == "12 Li (Wu)"
+
+
+def test_office_header_gets_blank_block(tmp_path):
+    tc, ch, out = tmp_path / "tc.xlsx", tmp_path / "chart.xlsx", tmp_path / "o.xlsx"
+    make_timeclock(tc, [
+        ("Office", 5, [(D(2026, 9, 17), D(2026, 9, 17), 5)]),
+        ("2 Al Jones", 4, [(D(2026, 9, 18), D(2026, 9, 18), 4)]),
+        ("Office Staff", 1, [(D(2026, 9, 19), D(2026, 9, 19), 1)]),       # not a perfect match
+    ])
+    make_chart(ch, [(2, 3, "Al", "A1", 1, 2, 3)])
+    _, stats = ct.run(tc, ch, ct.DEFAULT_CHART_SHEET, out, "2026-09", 34.03, "start")
+    ws = openpyxl.load_workbook(out)["Claim 2026-09"]
+    top = ct.FIRST_BLOCK_ROW + ct.BLOCK_PITCH                          # Office block is last
+    assert [ws.cell(top, c).value for c in (1, 2, 3)] == [None, None, None]
+    assert ws.cell(top + 2, 3).value == "Office"
+    assert ws.cell(top + 6, ct.FIRST_DAY_COL + 16).value == 5
+    assert stats["errors"] == 1                                         # only "Office Staff"
