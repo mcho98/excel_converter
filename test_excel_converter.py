@@ -229,3 +229,8 @@ def test_office_header_gets_blank_block(tmp_path):
     assert ws.cell(top + 2, 3).value == "Office"
     assert ws.cell(top + 6, ct.FIRST_DAY_COL + 16).value == 5
     assert stats["errors"] == 1                                         # only "Office Staff"
+
+
+def test_office_match_is_case_insensitive():
+    assert all(ct.is_office(h) for h in ("Office", "OFFICE", "office", "  Office "))
+    assert not ct.is_office("Office Staff")

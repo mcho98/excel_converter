@@ -178,7 +178,7 @@ OFFICE = "Office"      # special header with no family number: gets a block with
 
 
 def is_office(header) -> bool:
-    return clean(header) == OFFICE
+    return clean(header).casefold() == OFFICE.casefold()
 
 
 def norm(text) -> str:
