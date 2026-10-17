@@ -442,20 +442,27 @@ def write_block(ws, top, b: Block, rate, days_in_month):
     ws.cell(r(7), GRAND_COL, f"=SUM({col(SUM_COL)}{r(5)}:{col(SUM_COL)}{r(7)})")
     ws.cell(r(12), GRAND_COL, f"={col(SUM_COL)}{r(10)}*{rate_ref}").number_format = "0.00"
 
-    # half-month dollar sums, rows +19..+22: days 1-15 under day 15, days 16-end under the last day
+    # half-month subtotals, rows +19..+22: days 1-15 under day 15, days 16-end under the last day.
+    # Per destination column: label at dest-2, hours at dest-1, dollars at dest (headers in row +18).
     mid, end = FIRST_DAY_COL + 14, FIRST_DAY_COL + days_in_month - 1
     halves = [(mid, FIRST_DAY_COL, mid, "Days 1-15"), (end, mid + 1, end, f"Days 16-{days_in_month}")]
-    labels = ["Homemaking $$", "Personal Care $$", "Respite $$", "Total $$"]
+    labels = ["Homemaking", "Personal Care", "Respite", "Total"]
     for dest, c1, c2, title in halves:
-        ws.cell(r(18), dest, title).font = BOLD
+        ws.cell(r(18), dest - 2, title).font = BOLD
+        ws.cell(r(18), dest - 2).alignment = Alignment(horizontal="right")
+        ws.cell(r(18), dest - 1, "Hours").font = BOLD
+        ws.cell(r(18), dest, "$$").font = BOLD
         for k, lab in enumerate(labels):                   # right-aligned so the text spills left
-            ws.cell(r(19 + k), dest - 1, f"Subtotal {lab}").alignment = Alignment(horizontal="right")
-            paint(ws, r(19 + k), dest - 1, dest - 1, BLUE_M)
+            ws.cell(r(19 + k), dest - 2, f"Subtotal {lab}").alignment = Alignment(horizontal="right")
+            paint(ws, r(19 + k), dest - 2, dest - 2, BLUE_M)
         for k in range(3):
+            ws.cell(r(19 + k), dest - 1, f"=SUM({col(c1)}{r(5 + k)}:{col(c2)}{r(5 + k)})")
             ws.cell(r(19 + k), dest, f"=SUM({col(c1)}{r(14 + k)}:{col(c2)}{r(14 + k)})")
-        ws.cell(r(22), dest, f"=SUM({col(dest)}{r(19)}:{col(dest)}{r(21)})").font = BOLD
-        for k in range(4):
-            ws.cell(r(19 + k), dest).number_format = "0.00"
+        for c in (dest - 1, dest):
+            L = col(c)
+            ws.cell(r(22), c, f"=SUM({L}{r(19)}:{L}{r(21)})").font = BOLD
+            for k in range(4):
+                ws.cell(r(19 + k), c).number_format = "0.00"
 
 
 def box(ws, top_row, bottom_row, first_col, last_col):
@@ -470,24 +477,34 @@ def box(ws, top_row, bottom_row, first_col, last_col):
 
 
 def write_grand_totals(ws, n_blocks, days_in_month):
-    """After the last block: each subtotal row summed over all clients, plus both halves together."""
+    """After the last block: each subtotal row (hours and $$) summed over all clients, plus both halves together."""
     top = FIRST_BLOCK_ROW + (n_blocks - 1) * BLOCK_PITCH + 22 + 2 - 18   # header row sits 1 blank row under the last block
     mid, end = FIRST_DAY_COL + 14, FIRST_DAY_COL + days_in_month - 1
-    ws.cell(top + 18, mid, "All clients 1-15").font = BOLD
-    ws.cell(top + 18, end, f"All clients 16-{days_in_month}").font = BOLD
-    ws.cell(top + 18, GRAND_COL, "Month").font = BOLD
     right = Alignment(horizontal="right")
-    for k, lab in enumerate(["Homemaking $$", "Personal Care $$", "Respite $$", "Total $$"]):
+    # the month columns sit right of the last-day column (AI), so the label gets AJ and hours/$$ get AK/AL
+    month_hours, month_dollars = GRAND_COL, GRAND_COL + 1
+    for dest, title in ((mid, "All clients 1-15"), (end, f"All clients 16-{days_in_month}")):
+        ws.cell(top + 18, dest - 2, title).font = BOLD
+        ws.cell(top + 18, dest - 2).alignment = right
+        ws.cell(top + 18, dest - 1, "Hours").font = BOLD
+        ws.cell(top + 18, dest, "$$").font = BOLD
+    ws.cell(top + 18, SUM_COL, "Month").font = BOLD
+    ws.cell(top + 18, SUM_COL).alignment = right
+    ws.cell(top + 18, month_hours, "Hours").font = BOLD
+    ws.cell(top + 18, month_dollars, "$$").font = BOLD
+    for k, lab in enumerate(["Homemaking", "Personal Care", "Respite", "Total"]):
         row = top + 19 + k
         for dest in (mid, end):
-            refs = ",".join(f"{col(dest)}{FIRST_BLOCK_ROW + i * BLOCK_PITCH + 19 + k}" for i in range(n_blocks))
-            ws.cell(row, dest - 1, f"Subtotal {lab}").alignment = right
-            paint(ws, row, dest - 1, dest - 1, YELLOW)
-            ws.cell(row, dest, f"=SUM({refs})")
-        ws.cell(row, GRAND_COL - 1, f"Month {lab}").alignment = right
-        paint(ws, row, GRAND_COL - 1, GRAND_COL - 1, YELLOW)
-        ws.cell(row, GRAND_COL, f"={col(mid)}{row}+{col(end)}{row}")
-        for c in (mid, end, GRAND_COL):
+            ws.cell(row, dest - 2, f"Subtotal {lab}").alignment = right
+            paint(ws, row, dest - 2, dest - 2, YELLOW)
+            for c in (dest - 1, dest):                     # hours, then $$
+                refs = ",".join(f"{col(c)}{FIRST_BLOCK_ROW + i * BLOCK_PITCH + 19 + k}" for i in range(n_blocks))
+                ws.cell(row, c, f"=SUM({refs})")
+        ws.cell(row, SUM_COL, f"Month {lab}").alignment = right
+        paint(ws, row, SUM_COL, SUM_COL, YELLOW)
+        ws.cell(row, month_hours, f"={col(mid - 1)}{row}+{col(end - 1)}{row}")
+        ws.cell(row, month_dollars, f"={col(mid)}{row}+{col(end)}{row}")
+        for c in (mid - 1, mid, end - 1, end, month_hours, month_dollars):
             ws.cell(row, c).number_format = "0.00"
             if k == 3:
                 ws.cell(row, c).font = BOLD
@@ -522,8 +539,9 @@ def write_workbook(out_path, blocks, summary, input_rows, issues, year, month, r
         write_grand_totals(ws, len(blocks), days)
     for c, w in zip("ABCD", (13, 14, 30, 14)):
         ws.column_dimensions[c].width = w
-    for c in range(FIRST_DAY_COL, GRAND_COL + 1):
+    for c in range(FIRST_DAY_COL, GRAND_COL + 2):
         ws.column_dimensions[col(c)].width = 7.5
+    ws.column_dimensions[col(SUM_COL)].width = 24              # AJ also holds the "Month ..." labels
     ws.freeze_panes = "A3"
 
     s = wb.create_sheet("Summary")
