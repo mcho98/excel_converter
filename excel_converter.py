@@ -12,8 +12,9 @@ What it does
 3. Writes a NEW workbook with one 32-row claim block per client, a Summary sheet,
    an Input sheet (every shift that was read) and an Issues sheet.
 
-Nothing is modified in place and there is no state to reset: every run builds the
-output from scratch from the two input files.
+By default nothing is modified in place: every run builds a new file from the two input files.
+With --update CLAIM.xlsx (or the "Claim workbook to update" box) a second time clock export is
+written into an existing claim workbook instead; see update_workbook().
 """
 from __future__ import annotations
 
@@ -370,7 +371,7 @@ def plan(entries, chart, year, month, date_field):
             if abs(diff) > 0.05:
                 issues.append(Issue("WARN", f"time clock row {e.row}",
                                     f"{e.header}: shifts add to {sum(s.hours for s in e.shifts):.2f} h "
-                                    f"but the export's Total Hours says {e.total:g}."))
+                                    f"but the time clock's Total Hours says {e.total:g}."))
 
     blocks: list[Block] = []
     for fam in sorted(by_family):
@@ -581,20 +582,80 @@ def box(ws, top_row, bottom_row, first_col, last_col):
                                             bottom=edge if row == bottom_row else None)
 
 
-def write_grand_totals(ws, n_blocks, days_in_month):
+def write_grand_totals(ws, tops, days_in_month):
     """Below the last block: each subtotal table (hours and $$) summed over all clients."""
-    last_top = FIRST_BLOCK_ROW + (n_blocks - 1) * BLOCK_PITCH
+    last_top = tops[-1]
     header = last_top + HALF_OFF + 6                       # one blank row under the last block's box
     for off, spans in ((PERIOD_OFF, period_spans(days_in_month)), (HALF_OFF, half_spans(days_in_month))):
         def all_clients(k, dollars, d1, d2, c, off=off):
-            refs = ",".join(f"{col(c)}{FIRST_BLOCK_ROW + i * BLOCK_PITCH + off + 1 + k}" for i in range(n_blocks))
+            refs = ",".join(f"{col(c)}{t + off + 1 + k}" for t in tops)
             return f"=SUM({refs})"
         def all_claimed(k, c, off=off):
-            refs = ",".join(f"{col(c)}{FIRST_BLOCK_ROW + i * BLOCK_PITCH + off + 1 + k}" for i in range(n_blocks))
+            refs = ",".join(f"{col(c)}{t + off + 1 + k}" for t in tops)
             return f"=SUM({refs})"
         write_subtotals(ws, header, spans, all_clients, "All clients ", YELLOW, "Month ",
                         claimed=all_claimed if off == HALF_OFF else None)
         header += 6
+
+
+HEAD = {"Summary": (["Family", "Time clock header", "Time Clock 'Total Hours'", "Shift rows",
+                     "Hours in claim sheet", "Hours NOT in claim sheet"], (9, 48, 20, 11, 20, 24)),
+        "Input": (["Family", "Time clock header", "Start Date", "End Date", "Shift hours",
+                   "Time clock row", "Date used"], (9, 48, 12, 12, 12, 14, 12)),
+        "Issues": (["Level", "Where", "Message"], (8, 26, 120))}
+
+
+def get_sheet(wb, title):
+    """The named sheet, created with its header row and column widths if the workbook lacks it."""
+    if title in wb.sheetnames:
+        return wb[title]
+    header, widths = HEAD[title]
+    ws = wb.create_sheet(title)
+    ws.append(header)
+    for c in ws[1]:
+        c.font, c.fill = BOLD, HEAD_FILL
+    for letter, w in zip("ABCDEFG", widths):
+        ws.column_dimensions[letter].width = w
+    ws.freeze_panes = "A2"
+    return ws
+
+
+def add_summary(wb, summary):
+    """Append summary rows, keeping a single TOTAL row at the bottom."""
+    s = get_sheet(wb, "Summary")
+    for r_ in range(s.max_row, 1, -1):
+        if s.cell(r_, 1).value == "TOTAL":
+            s.delete_rows(r_)
+    for row in summary:
+        s.append(row)
+    n = s.max_row
+    s.append(["TOTAL", None, f"=SUM(C2:C{n})", f"=SUM(D2:D{n})", f"=SUM(E2:E{n})", f"=SUM(F2:F{n})"])
+    for c in s[n + 1]:
+        c.font = BOLD
+
+
+def add_input(wb, input_rows):
+    i = get_sheet(wb, "Input")
+    first = i.max_row + 1
+    for row in sorted(input_rows, key=lambda x: (x[0] is None, x[0] or 0, x[5])):
+        i.append(list(row))
+    for col_idx in (3, 4, 7):
+        for r_ in i.iter_rows(min_row=first, min_col=col_idx, max_col=col_idx):
+            for c in r_:
+                c.number_format = "yyyy-mm-dd"
+
+
+def add_issues(wb, issues):
+    """Append issues below the ones already on the sheet (never replaces them)."""
+    x = get_sheet(wb, "Issues")
+    if x.max_row == 2 and x.cell(2, 1).value == "OK":
+        x.delete_rows(2)
+    for iss in sorted(issues, key=lambda z: (z.level != "ERROR", z.level != "WARN", z.where)):
+        x.append([iss.level, iss.where, iss.message])
+        if iss.level == "ERROR":
+            x.cell(x.max_row, 1).font = WARN_FONT
+    if x.max_row == 1:
+        x.append(["OK", "", "No issues found."])
 
 
 def write_workbook(out_path, blocks, summary, input_rows, issues, year, month, rate, date_field):
@@ -619,11 +680,12 @@ def write_workbook(out_path, blocks, summary, input_rows, issues, year, month, r
     ws["A1"] = f"Hours counted by shift {date_field} date. Generated by excel_converter.py."
     ws["A1"].font = Font(italic=True, color="666666")
 
-    for i, b in enumerate(blocks):
-        write_block(ws, FIRST_BLOCK_ROW + i * BLOCK_PITCH, b, rate, days)
-        box(ws, FIRST_BLOCK_ROW + i * BLOCK_PITCH, FIRST_BLOCK_ROW + i * BLOCK_PITCH + HALF_OFF + 4, 1, CLAIM_COL + 1)
+    tops = [FIRST_BLOCK_ROW + i * BLOCK_PITCH for i in range(len(blocks))]
+    for top, b in zip(tops, blocks):
+        write_block(ws, top, b, rate, days)
+        box(ws, top, top + HALF_OFF + 4, 1, CLAIM_COL + 1)
     if blocks:
-        write_grand_totals(ws, len(blocks), days)
+        write_grand_totals(ws, tops, days)
     for c, w in zip("ABCD", (13, 14, 30, 14)):
         ws.column_dimensions[c].width = w
     for c in range(FIRST_DAY_COL, GRAND_COL + 2):
@@ -632,70 +694,137 @@ def write_workbook(out_path, blocks, summary, input_rows, issues, year, month, r
     ws.column_dimensions[col(SUM_COL)].width = 24              # AJ also holds the "Month ..." labels
     ws.freeze_panes = "A3"
 
-    s = wb.create_sheet("Summary")
-    s.append(["Family", "Time clock header", "Export 'Total Hours'", "Shift rows",
-              "Hours in claim sheet", "Hours NOT in claim sheet"])
-    for row in summary:
-        s.append(row)
-    n = len(summary) + 1
-    s.append(["TOTAL", None, f"=SUM(C2:C{n})", f"=SUM(D2:D{n})", f"=SUM(E2:E{n})", f"=SUM(F2:F{n})"])
-    for c in s[1]:
-        c.font, c.fill = BOLD, HEAD_FILL
-    for c in s[n + 1]:
-        c.font = BOLD
-    for c, w in zip("ABCDEF", (9, 48, 20, 11, 20, 24)):
-        s.column_dimensions[c].width = w
-    s.freeze_panes = "A2"
-
-    i = wb.create_sheet("Input")
-    i.append(["Family", "Time clock header", "Start Date", "End Date", "Shift hours",
-              "Time clock row", "Date used"])
-    for row in sorted(input_rows, key=lambda x: (x[0] is None, x[0] or 0, x[5])):
-        i.append(list(row))
-    for c in i[1]:
-        c.font, c.fill = BOLD, HEAD_FILL
-    for r_ in i.iter_rows(min_row=2, min_col=3, max_col=4):
-        for c in r_:
-            c.number_format = "yyyy-mm-dd"
-    for r_ in i.iter_rows(min_row=2, min_col=7, max_col=7):
-        for c in r_:
-            c.number_format = "yyyy-mm-dd"
-    for c, w in zip("ABCDEFG", (9, 48, 12, 12, 12, 14, 12)):
-        i.column_dimensions[c].width = w
-    i.freeze_panes = "A2"
-
-    x = wb.create_sheet("Issues")
-    x.append(["Level", "Where", "Message"])
-    for iss in sorted(issues, key=lambda z: (z.level != "ERROR", z.where)):
-        x.append([iss.level, iss.where, iss.message])
-        if iss.level == "ERROR":
-            x.cell(x.max_row, 1).font = WARN_FONT
-    if not issues:
-        x.append(["OK", "", "No issues found."])
-    for c in x[1]:
-        c.font, c.fill = BOLD, HEAD_FILL
-    for c, w in zip("ABC", (8, 26, 120)):
-        x.column_dimensions[c].width = w
+    add_summary(wb, summary)
+    add_input(wb, input_rows)
+    add_issues(wb, issues)
     wb.save(out_path)
 
 
+def block_key(family, client):
+    return ("office",) if family is None and client is None else (family, client)
+
+
+def month_of(ws):
+    d = ws.cell(2, FIRST_DAY_COL).value
+    if not isinstance(d, (dt.date, dt.datetime)):
+        raise InputError(f"{ws.title}: cell E2 should hold the first day of the month.")
+    return d.year, d.month
+
+
+def open_claim_workbook(path: Path):
+    """Load an existing claim workbook; return (workbook, claim sheet, year, month, block top rows)."""
+    if path.suffix.lower() != ".xlsx":
+        raise InputError(f"{path.name}: only .xlsx claim workbooks can be updated.")
+    try:
+        wb = openpyxl.load_workbook(path)
+    except Exception as e:                                   # openpyxl raises several types for bad files
+        raise InputError(f"{path.name}: cannot open as a workbook ({e}).") from e
+    sheets = [n for n in wb.sheetnames if n.startswith("Claim ")]
+    if not sheets:
+        raise InputError(f"{path.name}: no 'Claim YYYY-MM' sheet. Choose a workbook made by this program.")
+    ws = wb[sheets[0]]
+    year, month = month_of(ws)
+    tops = [r - 2 for r in range(FIRST_BLOCK_ROW + 2, ws.max_row + 1) if ws.cell(r, 2).value == "Client Name"]
+    if not tops:
+        raise InputError(f"{path.name}/{ws.title}: no client blocks found.")
+    if ws.cell(tops[0] + HALF_OFF, FIRST_DAY_COL + 12).value != "Days 1-15":
+        raise InputError(f"{path.name}/{ws.title}: blocks do not match the current layout "
+                         "(made by an older version?). Build a new workbook instead.")
+    return wb, ws, year, month, tops
+
+
+def update_workbook(wb, ws, tops, blocks, summary, input_rows, issues, year, month, rate):
+    """Write the planned blocks into an open claim workbook. New time clock hours replace what is there
+    (a warning for each non-zero value replaced); clients not in the file get new blocks."""
+    days = calendar.monthrange(year, month)[1]
+    existing: dict[tuple, list[int]] = collections.defaultdict(list)
+    for top in tops:
+        existing[block_key(to_int(ws.cell(top, 1).value), to_int(ws.cell(top, 2).value))].append(top)
+
+    new_blocks = []
+    for b in blocks:
+        key = block_key(b.family, b.client)
+        rows = existing.get(key)
+        if not rows:
+            new_blocks.append(b)
+            continue
+        top = rows[0]
+        if len(rows) > 1:
+            issues.append(Issue("WARN", f"{ws.title} row {top}",
+                                f"{b.name}: the file has {len(rows)} blocks for this client (rows "
+                                f"{', '.join(str(t) for t in rows)}); only the first was written to."))
+        for day, hrs in sorted(b.daily.items()):
+            cell = ws.cell(top + 6, FIRST_DAY_COL + day - 1)
+            new, old = round(hrs, 2), cell.value
+            blank = old is None or (isinstance(old, str) and not old.strip())
+            zero = isinstance(old, (int, float)) and abs(old) < 0.005
+            same = isinstance(old, (int, float)) and abs(old - new) < 0.005
+            if not (blank or zero or same):
+                issues.append(Issue("WARN", f"{ws.title}!{cell.coordinate}",
+                                    f"{b.name}: day {day} had {old} h; replaced with {new:g} h from the new time clock."))
+            cell.value = new
+            cell.number_format = "0.00"
+
+    if new_blocks:
+        file_rate = ws.cell(2, 4).value
+        if isinstance(file_rate, (int, float)) and abs(file_rate - rate) > 1e-9:
+            issues.append(Issue("WARN", f"{ws.title}!D2",
+                                f"New blocks use the file's rate {file_rate:g}, not {rate:g}."))
+            rate = file_rate
+        start = tops[-1] + HALF_OFF + 5                      # first row under the last block's box
+        if start <= ws.max_row:
+            ws.delete_rows(start, ws.max_row - start + 1)     # old all-clients totals; rebuilt below
+        for b in new_blocks:
+            top = tops[-1] + BLOCK_PITCH
+            tops.append(top)
+            write_block(ws, top, b, rate, days)
+            box(ws, top, top + HALF_OFF + 4, 1, CLAIM_COL + 1)
+            issues.append(Issue("INFO", f"{ws.title} row {top}", f"{b.name}: not in the file, new block added."))
+        write_grand_totals(ws, tops, days)
+
+    add_summary(wb, summary)
+    add_input(wb, input_rows)
+    add_issues(wb, issues)
+    return len(new_blocks)
+
+
 # --- command line / GUI -----------------------------------------------------
+def default_output() -> Path:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    return OUTPUT_DIR / f"{dt.datetime.now():%Y-%m-%d_%H%M%S}.xlsx"
+
+
 def run(timeclock: Path, chart_path: Path, chart_sheet: str, out: Path | None,
-        month: str | None, rate: float, date_field: str):
+        month: str | None, rate: float, date_field: str, update: Path | None = None):
+    """Build a claim workbook from the time clock. With `update`, write into that existing claim workbook
+    instead. The chosen file is left as it is; the result goes to `out` (default: a new file in output/)."""
     entries, issues = read_timeclock(timeclock)
     chart, chart_issues = read_chart(chart_path, chart_sheet)
     issues += chart_issues
-    year, mon = pick_month(entries, date_field, month)
+    if update:
+        wb, ws, year, mon, tops = open_claim_workbook(update)
+        if month and month != f"{year}-{mon:02d}":
+            raise InputError(f"--month {month} does not match the workbook's month {year}-{mon:02d}.")
+    else:
+        year, mon = pick_month(entries, date_field, month)
     blocks, summary, input_rows, plan_issues = plan(entries, chart, year, mon, date_field)
     issues += plan_issues
+    new_blocks = 0
     if out is None:
-        OUTPUT_DIR.mkdir(exist_ok=True)
-        out = OUTPUT_DIR / f"{dt.datetime.now():%Y-%m-%d_%H%M%S}.xlsx"
-    write_workbook(out, blocks, summary, input_rows, issues, year, mon, rate, date_field)
+        out = default_output()
+    try:
+        if update:
+            new_blocks = update_workbook(wb, ws, tops, blocks, summary, input_rows, issues, year, mon, rate)
+            wb.save(out)                                 # the chosen file itself is never modified
+        else:
+            write_workbook(out, blocks, summary, input_rows, issues, year, mon, rate, date_field)
+    except PermissionError as e:
+        raise InputError(f"Cannot save {out}. Close it in Excel and try again.") from e
     total_in = sum(r[4] for r in summary)
     total_out = sum(r[5] for r in summary)
     return out, dict(blocks=len(blocks), clients=len(entries), month=f"{year}-{mon:02d}",
                      hours_in=round(total_in, 2), hours_out=round(total_out, 2),
+                     updated=bool(update), new_blocks=new_blocks,
                      errors=sum(i.level == "ERROR" for i in issues),
                      warnings=sum(i.level == "WARN" for i in issues))
 
@@ -746,6 +875,7 @@ def gui_pick(args):
     chart_var = tk.StringVar(value=args.chart or saved_chart or "")
     rate_var = tk.StringVar(value=f"{args.rate if args.rate is not None else default_rate:g}")
     out_var = tk.StringVar(value=args.out or "")
+    upd_var = tk.StringVar(value=args.update or "")
     result = {}
 
     def browse(var, title, save=False):
@@ -757,11 +887,13 @@ def gui_pick(args):
         if path:
             var.set(path)
 
-    rows = [("Time clock export", tc_var, "Time clock export", False, "Required"),
+    rows = [("Time Clock", tc_var, "Time Clock", False, "Required"),
             ("Client chart workbook", chart_var, "Workbook containing the Family# Client# Chart sheet", False,
              "Default from config" if saved_chart else "Required"),
+            ("Claim workbook to update", upd_var, "Existing claim workbook to copy and add to", False,
+             "Leave blank to create a new file"),
             ("Output file", out_var, "Save the claim workbook as", True,
-             "Leave blank for output/<date>_<time>.xlsx")]
+             "Leave blank for output/<date>_<time>.xlsx (the workbook above is never changed)")]
     entries = {}
     for i, (label, var, title, save, hint) in enumerate(rows):
         ttk.Label(root, text=label).grid(row=i * 2, column=0, sticky="w", padx=8, pady=(8, 0))
@@ -776,8 +908,11 @@ def gui_pick(args):
 
     def ok(_event=None):
         tc, chart, out = tc_var.get().strip(), chart_var.get().strip(), out_var.get().strip()
+        upd = upd_var.get().strip()
+        if upd and not Path(upd).is_file():
+            return messagebox.showerror("Missing file", "The claim workbook to update was not found.", parent=root)
         if not tc or not Path(tc).is_file():
-            return messagebox.showerror("Missing file", "Choose the time clock export.", parent=root)
+            return messagebox.showerror("Missing file", "Choose the Time Clock file.", parent=root)
         if not chart or not Path(chart).is_file():
             return messagebox.showerror("Missing file", "Choose the client chart workbook.", parent=root)
         try:
@@ -786,7 +921,7 @@ def gui_pick(args):
                 raise ValueError
         except ValueError:
             return messagebox.showerror("Bad rate", "The rate must be a positive number.", parent=root)
-        result.update(timeclock=tc, chart=chart, rate=rate, out=out or None)
+        result.update(timeclock=tc, chart=chart, rate=rate, out=out or None, update=upd or None)
         root.withdraw()
         root.quit()
 
@@ -809,17 +944,20 @@ def gui_pick(args):
                                                "chart": result["chart"]}, indent=2))
         except OSError:
             pass
-    args.timeclock, args.chart, args.rate, args.out = (result[k] for k in ("timeclock", "chart", "rate", "out"))
+    args.timeclock, args.chart, args.rate, args.out, args.update = (
+        result[k] for k in ("timeclock", "chart", "rate", "out", "update"))
     return root, messagebox
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="Build the client claim workbook from a time clock export.")
-    p.add_argument("timeclock", nargs="?", help="time clock export (.xlsx)")
+    p = argparse.ArgumentParser(description="Build the client claim workbook from a time clock file.")
+    p.add_argument("timeclock", nargs="?", help="time clock file (.xlsx)")
     p.add_argument("--chart", help="workbook with the 'Family# Client# Chart' sheet (.xlsx/.xlsm); "
                                    "default: the \"chart\" path in config/excel_converter.json")
     p.add_argument("--chart-sheet", default=DEFAULT_CHART_SHEET)
     p.add_argument("-o", "--out", help="output file (default: output/<date>_<time>.xlsx beside the script)")
+    p.add_argument("--update", help="existing claim workbook (made by this program) to write into; "
+                                    "default: build a new file. The original is left untouched; the result goes to output/ (or -o).")
     p.add_argument("--month", help="claim month as YYYY-MM (default: the month most shifts fall in)")
     p.add_argument("--rate", type=float, default=None,
                    help=f"$/hr (default: \"default_rate\" in config/excel_converter.json, else {DEFAULT_RATE})")
@@ -837,15 +975,19 @@ def main(argv=None):
     try:
         rate = args.rate if args.rate is not None else config_rate()
         out, stats = run(Path(args.timeclock), Path(args.chart), args.chart_sheet,
-                         Path(args.out) if args.out else None, args.month, rate, args.date_field)
+                         Path(args.out) if args.out else None, args.month, rate, args.date_field,
+                         Path(args.update) if args.update else None)
     except InputError as e:
         if gui:
             gui[1].showerror("Cannot convert", str(e))
         sys.exit(f"ERROR: {e}")
-    msg = (f"Wrote {out}\n{stats['blocks']} claim blocks for {stats['clients']} time clock clients "
-           f"({stats['month']}); {stats['hours_in']:g} h in the claim sheet, "
-           f"{stats['hours_out']:g} h left out.\n"
-           f"{stats['errors']} error(s), {stats['warnings']} warning(s) - see the Issues sheet.")
+    msg = f"{'Updated' if stats['updated'] else 'Wrote'} {out}\n"
+    if stats["updated"]:
+        msg += f"{stats['new_blocks']} new client block(s) added.\n"
+    msg += (f"{stats['blocks']} claim blocks for {stats['clients']} time clock clients "
+            f"({stats['month']}); {stats['hours_in']:g} h in the claim sheet, "
+            f"{stats['hours_out']:g} h left out.\n"
+            f"{stats['errors']} error(s), {stats['warnings']} warning(s) - see the Issues sheet.")
     print(msg)
     if gui:
         gui[1].showinfo("Done", msg)

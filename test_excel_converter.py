@@ -286,3 +286,100 @@ def test_office_header_gets_blank_block(tmp_path):
 def test_office_match_is_case_insensitive():
     assert all(ct.is_office(h) for h in ("Office", "OFFICE", "office", "  Office "))
     assert not ct.is_office("Office Staff")
+
+
+# --- updating an existing claim workbook --------------------------------------
+def build_first_half(tmp_path):
+    tc, ch, out = tmp_path / "tc1.xlsx", tmp_path / "chart.xlsx", tmp_path / "claim.xlsx"
+    make_timeclock(tc, [("2 Al Jones", 4, [(D(2026, 9, 3), D(2026, 9, 3), 4), (D(2026, 9, 5), D(2026, 9, 5), 2)]),
+                        ("77 Ghost", 1, [(D(2026, 9, 4), D(2026, 9, 4), 1)])])
+    make_chart(ch, [(2, 3, "Al", "A1", 1, 2, 3), (8, 9, "Newbie", "N1", 0, 1, 0)])
+    ct.run(tc, ch, ct.DEFAULT_CHART_SHEET, out, "2026-09", 34.03, "start")
+    return ch, out
+
+
+def test_update_writes_new_days_warns_on_nonzero_and_keeps_issues(tmp_path):
+    ch, claim = build_first_half(tmp_path)
+    wb = openpyxl.load_workbook(claim)
+    ws = wb["Claim 2026-09"]
+    ws.cell(ct.FIRST_BLOCK_ROW + 6, ct.FIRST_DAY_COL + 15, 0)            # day 16 is 0.00: no warning
+    ws.cell(ct.FIRST_BLOCK_ROW + 6, ct.FIRST_DAY_COL + 16, 5)            # day 17 has 5 h: warning
+    ws.cell(ct.FIRST_BLOCK_ROW + 6, ct.FIRST_DAY_COL + 17, 3)            # day 18 has 3 h and gets 3: no warning
+    n_issues = wb["Issues"].max_row
+    wb.save(claim)
+    old_issues = [[c.value for c in r] for r in openpyxl.load_workbook(claim)["Issues"].iter_rows()]
+
+    tc2 = tmp_path / "tc2.xlsx"
+    make_timeclock(tc2, [("2 Al Jones", 9, [(D(2026, 9, 16), D(2026, 9, 16), 2), (D(2026, 9, 17), D(2026, 9, 17), 4),
+                                            (D(2026, 9, 18), D(2026, 9, 18), 3)]),
+                         ("8 Newbie", 2, [(D(2026, 9, 20), D(2026, 9, 20), 2)])])
+    out, stats = ct.run(tc2, ch, ct.DEFAULT_CHART_SHEET, tmp_path / "new.xlsx", None, 34.03, "start", update=claim)
+    assert out == tmp_path / "new.xlsx" and stats["updated"] and stats["new_blocks"] == 1
+    wb = openpyxl.load_workbook(out)
+    ws = wb["Claim 2026-09"]
+    pc = ct.FIRST_BLOCK_ROW + 6
+    assert ws.cell(pc, ct.FIRST_DAY_COL + 2).value == 4                  # day 3 from the first run is kept
+    assert [ws.cell(pc, ct.FIRST_DAY_COL + d).value for d in (15, 16, 17)] == [2, 4, 3]
+    issues = [[c.value for c in r] for r in wb["Issues"].iter_rows()]
+    assert issues[:len(old_issues)] == old_issues                        # earlier issues untouched
+    new = [r for r in issues[len(old_issues):] if r[0] == "WARN" and "replaced" in r[2]]
+    assert len(new) == 1 and "day 17" in new[0][2]
+
+
+def test_update_adds_block_for_new_client_and_rebuilds_grand_totals(tmp_path):
+    ch, claim = build_first_half(tmp_path)
+    wb = openpyxl.load_workbook(claim)
+    n_before = sum(1 for r in range(1, wb.active.max_row + 1) if wb.active.cell(r, 2).value == "Client Name")
+    tc2 = tmp_path / "tc2.xlsx"
+    make_timeclock(tc2, [("8 Newbie", 2, [(D(2026, 9, 20), D(2026, 9, 20), 2)])])
+    ct.run(tc2, ch, ct.DEFAULT_CHART_SHEET, tmp_path / "new.xlsx", None, 34.03, "start", update=claim)
+    ws = openpyxl.load_workbook(tmp_path / "new.xlsx")["Claim 2026-09"]
+    tops = [r - 2 for r in range(1, ws.max_row + 1) if ws.cell(r, 2).value == "Client Name"]
+    assert len(tops) == n_before + 1
+    assert [tops[i + 1] - tops[i] for i in range(len(tops) - 1)] == [ct.BLOCK_PITCH] * (len(tops) - 1)
+    new_top = tops[-1]
+    assert ws.cell(new_top, 1).value == 8 and ws.cell(new_top + 6, ct.FIRST_DAY_COL + 19).value == 2
+    hh = new_top + ct.HALF_OFF + 6 + 6                                    # all-clients half-month header
+    assert ws.cell(hh, ct.FIRST_DAY_COL + 12).value == "All clients 1-15"
+    f = ws.cell(hh + 1, ct.FIRST_DAY_COL + 13).value
+    assert f.count(",") == len(tops) - 1 and f.endswith(f"R{new_top + ct.HALF_OFF + 1})")
+
+
+def test_update_duplicate_blocks_write_to_first_only(tmp_path):
+    ch, claim = build_first_half(tmp_path)
+    wb = openpyxl.load_workbook(claim)
+    ws = wb["Claim 2026-09"]
+    top = ct.FIRST_BLOCK_ROW
+    # make the second block a copy of the first block's identity
+    ws.cell(top + ct.BLOCK_PITCH, 1, ws.cell(top, 1).value)
+    ws.cell(top + ct.BLOCK_PITCH, 2, ws.cell(top, 2).value)
+    wb.save(claim)
+    tc2 = tmp_path / "tc2.xlsx"
+    make_timeclock(tc2, [("2 Al Jones", 2, [(D(2026, 9, 20), D(2026, 9, 20), 2)])])
+    ct.run(tc2, ch, ct.DEFAULT_CHART_SHEET, tmp_path / "new.xlsx", None, 34.03, "start", update=claim)
+    wb = openpyxl.load_workbook(tmp_path / "new.xlsx")
+    ws = wb["Claim 2026-09"]
+    assert ws.cell(top + 6, ct.FIRST_DAY_COL + 19).value == 2
+    assert ws.cell(top + ct.BLOCK_PITCH + 6, ct.FIRST_DAY_COL + 19).value is None
+    assert any("only the first" in r[2].value for r in wb["Issues"].iter_rows(min_row=2))
+
+
+def test_update_leaves_original_untouched_and_defaults_to_output_folder(tmp_path, monkeypatch):
+    ch, claim = build_first_half(tmp_path)
+    before = claim.read_bytes()
+    monkeypatch.setattr(ct, "OUTPUT_DIR", tmp_path / "output")
+    tc2 = tmp_path / "tc2.xlsx"
+    make_timeclock(tc2, [("2 Al Jones", 2, [(D(2026, 9, 20), D(2026, 9, 20), 2)])])
+    out, _ = ct.run(tc2, ch, ct.DEFAULT_CHART_SHEET, None, None, 34.03, "start", update=claim)
+    assert claim.read_bytes() == before
+    assert out.parent == tmp_path / "output" and out != claim and out.exists()
+
+
+def test_update_rejects_wrong_month_and_non_claim_file(tmp_path):
+    ch, claim = build_first_half(tmp_path)
+    tc2 = tmp_path / "tc2.xlsx"
+    make_timeclock(tc2, [("2 Al Jones", 2, [(D(2026, 9, 20), D(2026, 9, 20), 2)])])
+    with pytest.raises(ct.InputError, match="does not match"):
+        ct.run(tc2, ch, ct.DEFAULT_CHART_SHEET, None, "2026-10", 34.03, "start", update=claim)
+    with pytest.raises(ct.InputError, match="Claim"):
+        ct.run(tc2, ch, ct.DEFAULT_CHART_SHEET, None, None, 34.03, "start", update=ch)
