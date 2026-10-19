@@ -9,7 +9,7 @@ Replaces the old VBA macros (tt_1_15 / tt_16_31 / reset).
 What it does
 1. Reads the time clock export (one header row per client, shift rows below it).
 2. Reads the "Family# Client# Chart" sheet (family -> clients, AHS IDs, monthly hours).
-3. Writes a NEW workbook with one 26-row claim block per client, a Summary sheet,
+3. Writes a NEW workbook with one 32-row claim block per client, a Summary sheet,
    an Input sheet (every shift that was read) and an Issues sheet.
 
 Nothing is modified in place and there is no state to reset: every run builds the
@@ -33,10 +33,14 @@ from openpyxl.utils import get_column_letter as col
 
 # --- layout of the claim sheet (matches the old workbook) -------------------
 FIRST_BLOCK_ROW = 3       # row of the first block's family/client numbers
-BLOCK_PITCH = 26          # rows from one block to the next
+BLOCK_PITCH = 32          # rows from one block to the next
 FIRST_DAY_COL = 5         # column E = day 1
 LAST_DAY_COL = 35         # column AI = day 31
 SUM_COL = 36              # AJ: row total
+PERIOD_OFF = 18           # block offset of the 1-10/11-15/16-25/26-end subtotal header row
+HALF_OFF = 24             # block offset of the 1-15/16-end subtotal header row
+SUBTOTAL_LABELS = ["Homemaking", "Personal Care", "Respite", "Total"]
+CLAIM_COL = 40           # AN: per-client month sum of the pink Claimed table (label; AO $$)
 GRAND_COL = 37            # AK: all-category total
 DEFAULT_RATE = 35.03      # $/hr, same as the old template
 DEFAULT_CHART_SHEET = "Family# Client# Chart"
@@ -49,6 +53,7 @@ OUTPUT_DIR = APP_DIR / "output"
 
 BOLD = Font(bold=True)
 WARN_FILL = PatternFill("solid", fgColor="FFF2CC")
+NAME_FILL = PatternFill("solid", fgColor="FFFF00")
 WARN_FONT = Font(bold=True, color="C00000")
 HEAD_FILL = PatternFill("solid", fgColor="D9E1F2")
 
@@ -57,6 +62,7 @@ YELLOW, GREY = "FFFF00", "E7E6E6"
 GREEN_L, GREEN_M, GREEN_D = "E2F0D9", "C5E0B4", "A9D18E"
 ORANGE_L, ORANGE_M = "FBE5D6", "F8CBAD"
 BLUE_L, BLUE_M = "DEEBF7", "BDD7EE"
+PINK = "FFB6C1"
 # (row offset in block, first column, last column, color); later entries paint over earlier ones
 BLOCK_FILLS = [
     (0, 1, 2, YELLOW),                                               # family / client
@@ -115,6 +121,7 @@ class Block:
     monthly: tuple
     daily: dict          # day-of-month -> hours (only on the client that receives the hours)
     note: str = ""
+    chart_name: str = ""     # name from the chart; written above the time clock name
 
 
 @dataclass
@@ -379,6 +386,7 @@ def plan(entries, chart, year, month, date_field):
             issues.append(Issue("ERROR", f"family {fam}",
                                 f"'{name}' is not in the chart. A block was created with no client "
                                 "number, AHS ID or monthly hours. Add the family to the chart and re-run."))
+            issues.append(Issue("WARN", f"family {fam}", f"'{name}': no chart name (family not in chart)."))
             blocks.append(Block(fam, None, name, None, (None, None, None), daily,
                                 "NOT IN CHART - add family to chart and re-run"))
             continue
@@ -387,9 +395,12 @@ def plan(entries, chart, year, month, date_field):
             if len(recs) > 1:
                 note = ("hours for the whole family are on this client's block" if i == 0 else
                         "second client in family - hours NOT split, enter manually")
+            if not r.name:
+                issues.append(Issue("WARN", f"chart row {r.row}",
+                                    f"Family {fam} client {r.client} ('{name}') has no name in the chart."))
             blocks.append(Block(fam, r.client, name, r.ahs_id,
                                 (r.homemaking, r.personal_care, r.respite),
-                                daily if i == 0 else {}, note))
+                                daily if i == 0 else {}, note, r.name))
     office = [e for e in entries if is_office(e.header)]
     if office:
         if len(office) > 1:
@@ -420,6 +431,9 @@ def write_block(ws, top, b: Block, rate, days_in_month):
             ws.cell(top, k).fill = WARN_FILL
     ws.cell(r(2), 2, "Client Name")
     ws.cell(r(2), 3, b.name).font = BOLD
+    if b.chart_name:                                       # chart name sits above the time clock name
+        ws.cell(r(1), 3, b.chart_name).font = BOLD
+        ws.cell(r(1), 3).fill = NAME_FILL
     ws.cell(r(2), 4, "Days in month")
     ws.cell(r(3), 4, days_in_month)
     ws.cell(r(4), 3, "rate $/hr")
@@ -460,27 +474,100 @@ def write_block(ws, top, b: Block, rate, days_in_month):
     ws.cell(r(7), GRAND_COL, f"=SUM({col(SUM_COL)}{r(5)}:{col(SUM_COL)}{r(7)})")
     ws.cell(r(12), GRAND_COL, f"={col(SUM_COL)}{r(10)}*{rate_ref}").number_format = "0.00"
 
-    # half-month subtotals, rows +19..+22: days 1-15 under day 15, days 16-end under the last day.
-    # Per destination column: label at dest-2, hours at dest-1, dollars at dest (headers in row +18).
-    mid, end = FIRST_DAY_COL + 14, FIRST_DAY_COL + days_in_month - 1
-    halves = [(mid, FIRST_DAY_COL, mid, "Days 1-15"), (end, mid + 1, end, f"Days 16-{days_in_month}")]
-    labels = ["Homemaking", "Personal Care", "Respite", "Total"]
-    for dest, c1, c2, title in halves:
-        ws.cell(r(18), dest - 2, title).font = BOLD
-        ws.cell(r(18), dest - 2).alignment = Alignment(horizontal="right")
-        ws.cell(r(18), dest - 1, "Hours").font = BOLD
-        ws.cell(r(18), dest, "$$").font = BOLD
-        for k, lab in enumerate(labels):                   # right-aligned so the text spills left
-            ws.cell(r(19 + k), dest - 2, f"Subtotal {lab}").alignment = Alignment(horizontal="right")
-            paint(ws, r(19 + k), dest - 2, dest - 2, BLUE_M)
-        for k in range(3):
-            ws.cell(r(19 + k), dest - 1, f"=SUM({col(c1)}{r(5 + k)}:{col(c2)}{r(5 + k)})")
-            ws.cell(r(19 + k), dest, f"=SUM({col(c1)}{r(14 + k)}:{col(c2)}{r(14 + k)})")
-        for c in (dest - 1, dest):
-            L = col(c)
-            ws.cell(r(22), c, f"=SUM({L}{r(19)}:{L}{r(21)})").font = BOLD
-            for k in range(4):
-                ws.cell(r(19 + k), c).number_format = "0.00"
+    # subtotal tables: 10/5-day periods (header +18, rows +19..+22), then half months (header +24, rows +25..+28).
+    # Per span: label at dest-2, hours at dest-1, dollars at dest; month sums sit right of the last day column.
+    def block_formula(k, dollars, d1, d2, c):
+        row = r(14 + k) if dollars else r(5 + k)
+        return f"=SUM({col(FIRST_DAY_COL + d1 - 1)}{row}:{col(FIRST_DAY_COL + d2 - 1)}{row})"
+    for off, spans in ((PERIOD_OFF, period_spans(days_in_month)), (HALF_OFF, half_spans(days_in_month))):
+        write_subtotals(ws, r(off), spans, block_formula, "Days ", BLUE_M, "Month ",
+                        claimed=(lambda k, c: 0) if off == HALF_OFF else None)
+
+
+def period_spans(days):
+    return [(1, 10), (11, 15), (16, 25), (26, days)]
+
+
+def half_spans(days):
+    return [(1, 15), (16, days)]
+
+
+def claimed_cols(dest):
+    """Label and $$ columns of the Claimed table for a span ending in column dest."""
+    return dest - 6, dest - 5                    # dest-4, dest-3 stay empty; dest-2 is the blue label
+
+
+def write_claimed(ws, header_row, spans, claimed, prefix):
+    right = Alignment(horizontal="right")
+    pink = PatternFill("solid", fgColor=PINK)
+    dests = [FIRST_DAY_COL + d2 - 1 for _, d2 in spans]
+    for (d1, d2), dest in zip(spans, dests):
+        lab_c, d_c = claimed_cols(dest)
+        ws.cell(header_row, lab_c, f"{prefix}Claimed {d1}-{d2}").font = BOLD
+        ws.cell(header_row, lab_c).alignment = right
+        ws.cell(header_row, d_c, "$$").font = BOLD
+        for k, lab in enumerate(SUBTOTAL_LABELS):
+            row = header_row + 1 + k
+            ws.cell(row, lab_c, f"Claimed {lab}").alignment = right
+            ws.cell(row, lab_c).fill = ws.cell(row, d_c).fill = pink
+            if k < 3:
+                ws.cell(row, d_c, claimed(k, d_c))
+            else:
+                L = col(d_c)
+                ws.cell(row, d_c, f"=SUM({L}{header_row + 1}:{L}{header_row + 3})").font = BOLD
+            ws.cell(row, d_c).number_format = "0.00"
+    ws.cell(header_row, CLAIM_COL, "Month Claimed").font = BOLD
+    ws.cell(header_row, CLAIM_COL).alignment = right
+    ws.cell(header_row, CLAIM_COL + 1, "$$").font = BOLD
+    for k, lab in enumerate(SUBTOTAL_LABELS):
+        row = header_row + 1 + k
+        ws.cell(row, CLAIM_COL, f"Month Claimed {lab}").alignment = right
+        c = ws.cell(row, CLAIM_COL + 1, "=" + "+".join(f"{col(claimed_cols(d)[1])}{row}" for d in dests))
+        c.number_format = "0.00"
+        ws.cell(row, CLAIM_COL).fill = c.fill = pink
+        if k == 3:
+            c.font = BOLD
+
+
+def write_subtotals(ws, header_row, spans, formula, title_prefix, label_rgb, month_prefix, claimed=None):
+    """One subtotal table: a column group per span plus the month sums (AJ label, AK hours, AL $$).
+    `formula(k, dollars, d1, d2, c)` gives the cell formula for category k (0-2) in column c.
+    `claimed(k, c)`, when given, adds a pink "Claimed" table left of each span (label, $$) with a
+    two-cell gap before the blue subtotal labels, plus its month sums right of the Month columns."""
+    right = Alignment(horizontal="right")
+    ws.cell(header_row, SUM_COL, "Month").font = BOLD
+    ws.cell(header_row, SUM_COL).alignment = right
+    ws.cell(header_row, GRAND_COL, "Hours").font = BOLD
+    ws.cell(header_row, GRAND_COL + 1, "$$").font = BOLD
+    dests = []
+    for d1, d2 in spans:
+        dest = FIRST_DAY_COL + d2 - 1
+        dests.append(dest)
+        ws.cell(header_row, dest - 2, f"{title_prefix}{d1}-{d2}").font = BOLD
+        ws.cell(header_row, dest - 2).alignment = right
+        ws.cell(header_row, dest - 1, "Hours").font = BOLD
+        ws.cell(header_row, dest, "$$").font = BOLD
+        for k, lab in enumerate(SUBTOTAL_LABELS):
+            row = header_row + 1 + k
+            ws.cell(row, dest - 2, f"Subtotal {lab}").alignment = right   # right-aligned so the text spills left
+            paint(ws, row, dest - 2, dest - 2, label_rgb)
+            for c in (dest - 1, dest):
+                if k < 3:
+                    ws.cell(row, c, formula(k, c == dest, d1, d2, c))
+                else:
+                    L = col(c)
+                    ws.cell(row, c, f"=SUM({L}{header_row + 1}:{L}{header_row + 3})").font = BOLD
+                ws.cell(row, c).number_format = "0.00"
+    if claimed:
+        write_claimed(ws, header_row, spans, claimed, title_prefix.replace("Days ", ""))
+    for k, lab in enumerate(SUBTOTAL_LABELS):
+        row = header_row + 1 + k
+        ws.cell(row, SUM_COL, f"{month_prefix}{lab}").alignment = right
+        paint(ws, row, SUM_COL, SUM_COL, YELLOW)
+        for out, shift in ((GRAND_COL, 1), (GRAND_COL + 1, 0)):          # hours, then $$
+            ws.cell(row, out, "=" + "+".join(f"{col(d - shift)}{row}" for d in dests)).number_format = "0.00"
+            if k == 3:
+                ws.cell(row, out).font = BOLD
 
 
 def box(ws, top_row, bottom_row, first_col, last_col):
@@ -495,37 +582,19 @@ def box(ws, top_row, bottom_row, first_col, last_col):
 
 
 def write_grand_totals(ws, n_blocks, days_in_month):
-    """After the last block: each subtotal row (hours and $$) summed over all clients, plus both halves together."""
-    top = FIRST_BLOCK_ROW + (n_blocks - 1) * BLOCK_PITCH + 22 + 2 - 18   # header row sits 1 blank row under the last block
-    mid, end = FIRST_DAY_COL + 14, FIRST_DAY_COL + days_in_month - 1
-    right = Alignment(horizontal="right")
-    # the month columns sit right of the last-day column (AI), so the label gets AJ and hours/$$ get AK/AL
-    month_hours, month_dollars = GRAND_COL, GRAND_COL + 1
-    for dest, title in ((mid, "All clients 1-15"), (end, f"All clients 16-{days_in_month}")):
-        ws.cell(top + 18, dest - 2, title).font = BOLD
-        ws.cell(top + 18, dest - 2).alignment = right
-        ws.cell(top + 18, dest - 1, "Hours").font = BOLD
-        ws.cell(top + 18, dest, "$$").font = BOLD
-    ws.cell(top + 18, SUM_COL, "Month").font = BOLD
-    ws.cell(top + 18, SUM_COL).alignment = right
-    ws.cell(top + 18, month_hours, "Hours").font = BOLD
-    ws.cell(top + 18, month_dollars, "$$").font = BOLD
-    for k, lab in enumerate(["Homemaking", "Personal Care", "Respite", "Total"]):
-        row = top + 19 + k
-        for dest in (mid, end):
-            ws.cell(row, dest - 2, f"Subtotal {lab}").alignment = right
-            paint(ws, row, dest - 2, dest - 2, YELLOW)
-            for c in (dest - 1, dest):                     # hours, then $$
-                refs = ",".join(f"{col(c)}{FIRST_BLOCK_ROW + i * BLOCK_PITCH + 19 + k}" for i in range(n_blocks))
-                ws.cell(row, c, f"=SUM({refs})")
-        ws.cell(row, SUM_COL, f"Month {lab}").alignment = right
-        paint(ws, row, SUM_COL, SUM_COL, YELLOW)
-        ws.cell(row, month_hours, f"={col(mid - 1)}{row}+{col(end - 1)}{row}")
-        ws.cell(row, month_dollars, f"={col(mid)}{row}+{col(end)}{row}")
-        for c in (mid - 1, mid, end - 1, end, month_hours, month_dollars):
-            ws.cell(row, c).number_format = "0.00"
-            if k == 3:
-                ws.cell(row, c).font = BOLD
+    """Below the last block: each subtotal table (hours and $$) summed over all clients."""
+    last_top = FIRST_BLOCK_ROW + (n_blocks - 1) * BLOCK_PITCH
+    header = last_top + HALF_OFF + 6                       # one blank row under the last block's box
+    for off, spans in ((PERIOD_OFF, period_spans(days_in_month)), (HALF_OFF, half_spans(days_in_month))):
+        def all_clients(k, dollars, d1, d2, c, off=off):
+            refs = ",".join(f"{col(c)}{FIRST_BLOCK_ROW + i * BLOCK_PITCH + off + 1 + k}" for i in range(n_blocks))
+            return f"=SUM({refs})"
+        def all_claimed(k, c, off=off):
+            refs = ",".join(f"{col(c)}{FIRST_BLOCK_ROW + i * BLOCK_PITCH + off + 1 + k}" for i in range(n_blocks))
+            return f"=SUM({refs})"
+        write_subtotals(ws, header, spans, all_clients, "All clients ", YELLOW, "Month ",
+                        claimed=all_claimed if off == HALF_OFF else None)
+        header += 6
 
 
 def write_workbook(out_path, blocks, summary, input_rows, issues, year, month, rate, date_field):
@@ -552,13 +621,14 @@ def write_workbook(out_path, blocks, summary, input_rows, issues, year, month, r
 
     for i, b in enumerate(blocks):
         write_block(ws, FIRST_BLOCK_ROW + i * BLOCK_PITCH, b, rate, days)
-        box(ws, FIRST_BLOCK_ROW + i * BLOCK_PITCH, FIRST_BLOCK_ROW + i * BLOCK_PITCH + 22, 1, GRAND_COL)
+        box(ws, FIRST_BLOCK_ROW + i * BLOCK_PITCH, FIRST_BLOCK_ROW + i * BLOCK_PITCH + HALF_OFF + 4, 1, CLAIM_COL + 1)
     if blocks:
         write_grand_totals(ws, len(blocks), days)
     for c, w in zip("ABCD", (13, 14, 30, 14)):
         ws.column_dimensions[c].width = w
     for c in range(FIRST_DAY_COL, GRAND_COL + 2):
         ws.column_dimensions[col(c)].width = 7.5
+    ws.column_dimensions[col(CLAIM_COL)].width = 24
     ws.column_dimensions[col(SUM_COL)].width = 24              # AJ also holds the "Month ..." labels
     ws.freeze_panes = "A3"
 
