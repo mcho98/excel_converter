@@ -189,10 +189,11 @@ def test_claimed_table_left_of_half_month_subtotals(files):
     for d2 in (15, 30):
         dest = ct.FIRST_DAY_COL + d2 - 1
         lab, dol = ct.claimed_cols(dest)
-        assert dol == dest - 5 and lab == dol - 1 and (dest - 2) - dol == 3   # two empty cells before the blue label
+        assert dol == dest - 5 and lab == dol - 2 and (dest - 2) - dol == 3   # two empty cells before the blue label
         assert ws.cell(h + 1, dest - 4).value is None and ws.cell(h + 1, dest - 3).value is None
-        assert ws.cell(h + 1, lab).value == "Claimed Homemaking"
-        assert ws.cell(h, dol).value == "$$" and ws.cell(h + 3, dol).value == 0
+        assert ws.cell(h + 1, lab).value == "Claimed 1"
+        assert all(ws.cell(h + k, dol).value is None for k in (1, 2, 3))   # Claimed 1-3 are typed by hand
+        assert ws.cell(h + 4, lab).value == "Total Claimed"
         assert ws.cell(h + 4, dol).value == f"=SUM({ct.col(dol)}{h + 1}:{ct.col(dol)}{h + 3})"
         assert ws.cell(h + 2, lab).fill.fgColor.rgb[-6:] == ct.PINK
     d1_ = ct.claimed_cols(ct.FIRST_DAY_COL + 14)[1]
@@ -201,8 +202,8 @@ def test_claimed_table_left_of_half_month_subtotals(files):
     assert ws.cell(top + ct.PERIOD_OFF + 1, ct.CLAIM_COL).value is None   # period table has no claimed table
     last = top + 3 * ct.BLOCK_PITCH
     gh = last + ct.HALF_OFF + 12                                    # all-clients half-month header
-    f = ws.cell(gh + 1, d1_).value
-    assert f.startswith(f"=SUM({ct.col(d1_)}{h + 1},") and f.count(",") == 3
+    f = ws.cell(gh + 4, d1_).value                                  # only Total Claimed is drawn
+    assert f.startswith(f"=SUM({ct.col(d1_)}{h + 4},") and f.count(",") == 3
 
 
 def test_grand_totals_after_last_block(files):
