@@ -482,7 +482,7 @@ def write_block(ws, top, b: Block, rate, days_in_month):
         return f"=SUM({col(FIRST_DAY_COL + d1 - 1)}{row}:{col(FIRST_DAY_COL + d2 - 1)}{row})"
     for off, spans in ((PERIOD_OFF, period_spans(days_in_month)), (HALF_OFF, half_spans(days_in_month))):
         write_subtotals(ws, r(off), spans, block_formula, "Days ", BLUE_M, "Month ",
-                        claimed=(lambda k, c: 0) if off == HALF_OFF else None)
+                        claimed=(lambda k, c: None) if off == HALF_OFF else None)
 
 
 def period_spans(days):
@@ -494,40 +494,42 @@ def half_spans(days):
 
 
 def claimed_cols(dest):
-    """Label and $$ columns of the Claimed table for a span ending in column dest."""
-    return dest - 6, dest - 5                    # dest-4, dest-3 stay empty; dest-2 is the blue label
+    """Label and $$ columns of the Claimed box for a span ending in column dest.
+    The box covers three columns (label spills into the middle one); dest-4, dest-3 stay empty."""
+    return dest - 7, dest - 5
 
 
-def write_claimed(ws, header_row, spans, claimed, prefix):
+def write_claimed(ws, header_row, spans, claimed, grand=False):
+    """Pink box per span: Claimed 1-3 (blank, typed by hand) and Total Claimed (their sum, shown right).
+    For the all-clients table (`grand`) only the yellow Total Claimed row is drawn: the sum of each
+    client's Total Claimed."""
     right = Alignment(horizontal="right")
-    pink = PatternFill("solid", fgColor=PINK)
+    fill = PatternFill("solid", fgColor=YELLOW if grand else PINK)
     dests = [FIRST_DAY_COL + d2 - 1 for _, d2 in spans]
-    for (d1, d2), dest in zip(spans, dests):
+    for dest in dests:
         lab_c, d_c = claimed_cols(dest)
-        ws.cell(header_row, lab_c, f"{prefix}Claimed {d1}-{d2}").font = BOLD
-        ws.cell(header_row, lab_c).alignment = right
-        ws.cell(header_row, d_c, "$$").font = BOLD
-        for k, lab in enumerate(SUBTOTAL_LABELS):
+        first_k = 3 if grand else 0
+        top = header_row + 1 + first_k
+        for k in range(first_k, 4):
             row = header_row + 1 + k
-            ws.cell(row, lab_c, f"Claimed {lab}").alignment = right
-            ws.cell(row, lab_c).fill = ws.cell(row, d_c).fill = pink
-            if k < 3:
-                ws.cell(row, d_c, claimed(k, d_c))
-            else:
-                L = col(d_c)
-                ws.cell(row, d_c, f"=SUM({L}{header_row + 1}:{L}{header_row + 3})").font = BOLD
-            ws.cell(row, d_c).number_format = "0.00"
-    ws.cell(header_row, CLAIM_COL, "Month Claimed").font = BOLD
-    ws.cell(header_row, CLAIM_COL).alignment = right
-    ws.cell(header_row, CLAIM_COL + 1, "$$").font = BOLD
-    for k, lab in enumerate(SUBTOTAL_LABELS):
-        row = header_row + 1 + k
-        ws.cell(row, CLAIM_COL, f"Month Claimed {lab}").alignment = right
-        c = ws.cell(row, CLAIM_COL + 1, "=" + "+".join(f"{col(claimed_cols(d)[1])}{row}" for d in dests))
-        c.number_format = "0.00"
-        ws.cell(row, CLAIM_COL).fill = c.fill = pink
-        if k == 3:
-            c.font = BOLD
+            ws.cell(row, lab_c, f"Claimed {k + 1}" if k < 3 else "Total Claimed")
+            for c in range(lab_c, d_c + 1):
+                ws.cell(row, c).fill = fill
+            cell = ws.cell(row, d_c)
+            if k == 3:
+                cell.value = claimed(k, d_c) if grand else f"=SUM({col(d_c)}{header_row + 1}:{col(d_c)}{header_row + 3})"
+                ws.cell(row, lab_c).font = cell.font = BOLD if grand else Font()
+            cell.number_format = "0.00"
+        box(ws, top, header_row + 4, lab_c, d_c)
+    ws.cell(header_row, CLAIM_COL + 1, "Claimed $$").font = BOLD
+    ws.cell(header_row, CLAIM_COL + 1).alignment = right
+    k = 3
+    row = header_row + 1 + k
+    ws.cell(row, CLAIM_COL, "Month Total Claimed").alignment = right
+    c = ws.cell(row, CLAIM_COL + 1, "=" + "+".join(f"{col(claimed_cols(d)[1])}{row}" for d in dests))
+    c.number_format = "0.00"
+    c.font = BOLD
+    ws.cell(row, CLAIM_COL).fill = c.fill = fill
 
 
 def write_subtotals(ws, header_row, spans, formula, title_prefix, label_rgb, month_prefix, claimed=None):
@@ -560,7 +562,7 @@ def write_subtotals(ws, header_row, spans, formula, title_prefix, label_rgb, mon
                     ws.cell(row, c, f"=SUM({L}{header_row + 1}:{L}{header_row + 3})").font = BOLD
                 ws.cell(row, c).number_format = "0.00"
     if claimed:
-        write_claimed(ws, header_row, spans, claimed, title_prefix.replace("Days ", ""))
+        write_claimed(ws, header_row, spans, claimed, grand=title_prefix.startswith("All"))
     for k, lab in enumerate(SUBTOTAL_LABELS):
         row = header_row + 1 + k
         ws.cell(row, SUM_COL, f"{month_prefix}{lab}").alignment = right
